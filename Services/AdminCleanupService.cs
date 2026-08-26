@@ -14,6 +14,8 @@ public class AdminCleanupService : IAdminCleanupService
     {
         var egyptTimeZone = GetEgyptTimeZone();
         var egyptNow = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, egyptTimeZone);
+        var egyptDate = DateOnly.FromDateTime(egyptNow);
+
         var startLocal = DateTime.SpecifyKind(egyptNow.Date, DateTimeKind.Unspecified);
         var endLocal = startLocal.AddDays(1);
         var startUtc = TimeZoneInfo.ConvertTimeToUtc(startLocal, egyptTimeZone);
@@ -27,8 +29,10 @@ public class AdminCleanupService : IAdminCleanupService
                 .Where(x => !x.Accepted && x.AttemptTimeUtc >= startUtc && x.AttemptTimeUtc < endUtc)
                 .ExecuteDeleteAsync(ct);
 
+            // AttendanceDate is the application's business-day column and is indexed.
+            // Using it keeps cleanup consistent with dashboard/date filters.
             var deletedAttendance = await _db.AttendanceRecords
-                .Where(x => x.CheckInTimeUtc >= startUtc && x.CheckInTimeUtc < endUtc)
+                .Where(x => x.AttendanceDate == egyptDate)
                 .ExecuteDeleteAsync(ct);
 
             await transaction.CommitAsync(ct);
