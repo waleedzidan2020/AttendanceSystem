@@ -243,6 +243,7 @@ builder.Services.AddRateLimiter(options =>
 builder.Services.AddScoped<IGeofenceService, GeofenceService>();
 builder.Services.AddScoped<IAttendanceService, AttendanceService>();
 builder.Services.AddScoped<IAdminDashboardService, AdminDashboardService>();
+builder.Services.AddScoped<IAdminCleanupService, AdminCleanupService>();
 
 var app = builder.Build();
 
