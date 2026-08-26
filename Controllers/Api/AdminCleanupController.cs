@@ -12,6 +12,7 @@ public class AdminCleanupController : ControllerBase
 
     public AdminCleanupController(IAdminCleanupService service) => _service = service;
 
+    [HttpPost("today")]
     [HttpDelete("today")]
     public async Task<IActionResult> DeleteToday(CancellationToken ct)
     {
