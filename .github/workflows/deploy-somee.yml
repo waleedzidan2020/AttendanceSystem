@@ -1,6 +1,9 @@
 name: Deploy AttendanceSystem to Somee
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 jobs:
