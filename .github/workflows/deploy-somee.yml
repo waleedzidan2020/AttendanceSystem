@@ -25,6 +25,28 @@ jobs:
       - name: Build project
         run: dotnet build AttendanceSystem.csproj -c Release --no-restore
 
+      - name: Install EF Core CLI
+        run: dotnet tool install --global dotnet-ef --version 8.0.8
+
+      - name: Create EF migration bundle
+        env:
+          ASPNETCORE_ENVIRONMENT: Production
+          ConnectionStrings__DefaultConnection: ${{ secrets.SUPABASE_CONNECTION_STRING }}
+        run: >
+          dotnet ef migrations bundle
+          --project AttendanceSystem.csproj
+          --configuration Release
+          --output ./efbundle
+
+      - name: Apply migrations to Supabase
+        env:
+          ASPNETCORE_ENVIRONMENT: Production
+          ConnectionStrings__DefaultConnection: ${{ secrets.SUPABASE_CONNECTION_STRING }}
+          DEPLOYMENT_CONNECTION_STRING: ${{ secrets.SUPABASE_CONNECTION_STRING }}
+        run: |
+          chmod +x ./efbundle
+          ./efbundle --connection "$DEPLOYMENT_CONNECTION_STRING"
+
       - name: Publish project
         run: dotnet publish AttendanceSystem.csproj -c Release -f net8.0 --no-build -o ./publish
 
