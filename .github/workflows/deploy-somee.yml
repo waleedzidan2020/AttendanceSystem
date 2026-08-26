@@ -1,0 +1,34 @@
+name: Deploy AttendanceSystem to Somee
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore dependencies
+        run: dotnet restore AttendanceSystem.csproj
+
+      - name: Build project
+        run: dotnet build AttendanceSystem.csproj -c Release --no-restore
+
+      - name: Publish project
+        run: dotnet publish AttendanceSystem.csproj -c Release -f net8.0 --no-build -o ./publish
+
+      - name: Deploy to Somee via FTP
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+        with:
+          server: ${{ secrets.SOMEE_FTP_SERVER }}
+          username: ${{ secrets.SOMEE_FTP_USERNAME }}
+          password: ${{ secrets.SOMEE_FTP_PASSWORD }}
+          local-dir: ./publish/
