@@ -1,0 +1,7 @@
+@{ ViewData["Title"]="لوحة التحكم"; Layout="_AdminLayout"; }
+<div id="dashboardCards" class="row g-3 mb-4"></div>
+<div class="card shadow-sm border-0">
+  <div class="card-header bg-white d-flex justify-content-between align-items-center"><strong>حضور اليوم</strong><span class="small text-muted" id="lastUpdated"></span></div>
+  <div class="card-body p-0"><div class="table-responsive"><table class="table mb-0 align-middle"><thead><tr><th>العامل</th><th>الكود</th><th>الموقع</th><th>الدخول</th><th>الخروج</th><th>الحالة</th></tr></thead><tbody id="attendanceBody"></tbody></table></div></div>
+</div>
+@section Scripts { <script src="~/js/admin-dashboard.js" asp-append-version="true"></script> }

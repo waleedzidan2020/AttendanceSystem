@@ -1,0 +1,26 @@
+@{
+    ViewData["Title"] = "اختيار نوع المستخدم";
+    Layout = "_Layout";
+}
+<div class="landing-page container-fluid d-flex align-items-center justify-content-center min-vh-100 p-3">
+    <div class="choice-panel text-center">
+        <h1 class="mb-2">نظام الحضور</h1>
+        <p class="text-muted mb-4">اختر طريقة الدخول</p>
+        <div class="row g-3">
+            <div class="col-12 col-md-6">
+                <a href="/worker/checkin" class="choice-card text-decoration-none d-block h-100">
+                    <div class="choice-icon">👷</div>
+                    <h2 class="h4">أنا عامل</h2>
+                    <p class="mb-0">تسجيل الحضور والانصراف</p>
+                </a>
+            </div>
+            <div class="col-12 col-md-6">
+                <a href="/admin/login" class="choice-card text-decoration-none d-block h-100">
+                    <div class="choice-icon">👨‍💼</div>
+                    <h2 class="h4">أنا مسؤول</h2>
+                    <p class="mb-0">الدخول إلى لوحة الإدارة</p>
+                </a>
+            </div>
+        </div>
+    </div>
+</div>

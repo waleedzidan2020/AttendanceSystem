@@ -1,0 +1,32 @@
+@{
+    ViewData["Title"] = "تسجيل الحضور";
+    Layout = "_Layout";
+}
+<link rel="stylesheet" href="~/css/worker.css" asp-append-version="true" />
+<div class="worker-page min-vh-100 d-flex align-items-center justify-content-center p-3">
+    <div class="worker-card">
+        <div class="text-center mb-4">
+            <div class="worker-icon">👷</div>
+            <h1 class="h3">نظام الحضور</h1>
+            <p class="text-muted">تسجيل الحضور والانصراف من موقع العمل</p>
+        </div>
+
+        <div id="mainForm">
+            <label class="form-label" for="employeeCode">كود العامل</label>
+            <input class="form-control form-control-lg" id="employeeCode" autocomplete="off" placeholder="EMP-1025" />
+            <div class="form-text">سيتم حفظ الكود على هذا الجهاز فقط لتسهيل الاستخدام.</div>
+
+            <button class="btn btn-outline-primary w-100 mt-3" id="locationBtn">السماح بالموقع</button>
+            <div id="locationStatus" class="status-box mt-3 d-none"></div>
+
+            <button class="btn btn-success action-btn w-100 mt-4" id="attendanceBtn" disabled>CHECK IN</button>
+            <div id="messageBox" class="mt-3"></div>
+        </div>
+
+        <div id="resultPanel" class="d-none"></div>
+        <div class="text-center mt-4"><a href="/" class="small text-decoration-none">العودة للرئيسية</a></div>
+    </div>
+</div>
+@section Scripts {
+<script src="~/js/worker-checkin.js" asp-append-version="true"></script>
+}
