@@ -32,3 +32,4 @@ jobs:
           username: ${{ secrets.SOMEE_FTP_USERNAME }}
           password: ${{ secrets.SOMEE_FTP_PASSWORD }}
           local-dir: ./publish/
+          server-dir: /www.workers.somee.com/
