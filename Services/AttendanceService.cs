@@ -107,7 +107,7 @@ public class AttendanceService : IAttendanceService
                 CheckInTimeUtc = now, CheckInLatitude = request.Latitude, CheckInLongitude = request.Longitude,
                 CheckInAccuracyMeters = request.Accuracy, CheckInDistanceMeters = distance,
                 Status = AttendanceStatus.Present, IsLate = false, LateMinutes = 0,
-                AttendanceDate = DateOnly.FromDateTime(now), CreatedAt = now
+                AttendanceDate = GetEgyptDate(now), CreatedAt = now
             };
             attempt.Accepted = true; attempt.RejectReason = AttendanceRejectReason.None;
             _db.AttendanceRecords.Add(record);
@@ -142,6 +142,24 @@ public class AttendanceService : IAttendanceService
         await _db.SaveChangesAsync(ct); await tx.CommitAsync(ct);
         var worked = Math.Max(0, (int)Math.Round((now - record.CheckInTimeUtc).TotalMinutes));
         return ApiResponse<AttendanceOperationResponse>.Ok(new(record.Id, employee.EmployeeCode, employee.FullName, employee.WorkSite.Name, record.CheckInTimeUtc, now, worked, distance, request.Accuracy, record.Status.ToString()), "Check-out successfully recorded.");
+    }
+
+    private static DateOnly GetEgyptDate(DateTime utcNow)
+    {
+        var tz = GetEgyptTimeZone();
+        return DateOnly.FromDateTime(TimeZoneInfo.ConvertTimeFromUtc(utcNow, tz));
+    }
+
+    private static TimeZoneInfo GetEgyptTimeZone()
+    {
+        try
+        {
+            return TimeZoneInfo.FindSystemTimeZoneById("Africa/Cairo");
+        }
+        catch (TimeZoneNotFoundException)
+        {
+            return TimeZoneInfo.FindSystemTimeZoneById("Egypt Standard Time");
+        }
     }
 
     private static bool ValidCoordinates(CheckInRequest r) => r.Latitude is >= -90 and <= 90 && r.Longitude is >= -180 and <= 180 && r.Accuracy > 0;
