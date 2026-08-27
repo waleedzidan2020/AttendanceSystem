@@ -9,6 +9,10 @@ public class AdminLoginRequest
 public record AdminLoginResponse(string FullName);
 public record DashboardResponse(int TotalEmployees, int PresentToday, int AbsentToday, int LateToday, int RejectedAttemptsToday, int CurrentlyCheckedIn);
 public record AdminCleanupResponse(int DeletedAttendance, int DeletedRejectedAttempts);
+public class AdminCleanupByDateRequest
+{
+    [Required] public DateOnly? Date { get; set; }
+}
 
 public class EmployeeCreateRequest
 {
