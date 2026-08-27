@@ -12,6 +12,13 @@ public class AdminCleanupController : ControllerBase
 
     public AdminCleanupController(IAdminCleanupService service) => _service = service;
 
+    [HttpPost("by-date")]
+    public async Task<IActionResult> DeleteByDate([FromBody] AdminCleanupByDateRequest request, CancellationToken ct)
+    {
+        var result = await _service.DeleteByDateAsync(request.Date!.Value, ct);
+        return Ok(ApiResponse<AdminCleanupResponse>.Ok(result, "Selected date data was deleted successfully."));
+    }
+
     [HttpPost("today")]
     [HttpDelete("today")]
     public async Task<IActionResult> DeleteToday(CancellationToken ct)
