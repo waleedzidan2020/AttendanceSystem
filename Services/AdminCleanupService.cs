@@ -10,16 +10,16 @@ public class AdminCleanupService : IAdminCleanupService
 
     public AdminCleanupService(ApplicationDbContext db) => _db = db;
 
-    public async Task<AdminCleanupResponse> DeleteTodayAsync(CancellationToken ct = default)
+    public async Task<AdminCleanupResponse> DeleteByDateAsync(DateOnly date, CancellationToken ct = default)
     {
-        var egyptTimeZone = GetEgyptTimeZone();
-        var egyptNow = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, egyptTimeZone);
-        var egyptDate = DateOnly.FromDateTime(egyptNow);
+        if (date == DateOnly.MinValue)
+            throw new ArgumentOutOfRangeException(nameof(date), "A valid cleanup date is required.");
 
-        var startLocal = DateTime.SpecifyKind(egyptNow.Date, DateTimeKind.Unspecified);
-        var endLocal = startLocal.AddDays(1);
-        var startUtc = TimeZoneInfo.ConvertTimeToUtc(startLocal, egyptTimeZone);
-        var endUtc = TimeZoneInfo.ConvertTimeToUtc(endLocal, egyptTimeZone);
+        var egyptTimeZone = GetEgyptTimeZone();
+        var startLocal = DateTime.SpecifyKind(date.ToDateTime(TimeOnly.MinValue), DateTimeKind.Unspecified);
+        var endLocal = DateTime.SpecifyKind(date.AddDays(1).ToDateTime(TimeOnly.MinValue), DateTimeKind.Unspecified);
+        var startUtc = ConvertLocalBoundaryToUtc(startLocal, egyptTimeZone);
+        var endUtc = ConvertLocalBoundaryToUtc(endLocal, egyptTimeZone);
 
         await using var transaction = await _db.Database.BeginTransactionAsync(ct);
 
@@ -29,10 +29,8 @@ public class AdminCleanupService : IAdminCleanupService
                 .Where(x => !x.Accepted && x.AttemptTimeUtc >= startUtc && x.AttemptTimeUtc < endUtc)
                 .ExecuteDeleteAsync(ct);
 
-            // AttendanceDate is the application's business-day column and is indexed.
-            // Using it keeps cleanup consistent with dashboard/date filters.
             var deletedAttendance = await _db.AttendanceRecords
-                .Where(x => x.AttendanceDate == egyptDate)
+                .Where(x => x.AttendanceDate == date)
                 .ExecuteDeleteAsync(ct);
 
             await transaction.CommitAsync(ct);
@@ -44,6 +42,21 @@ public class AdminCleanupService : IAdminCleanupService
             await transaction.RollbackAsync(ct);
             throw;
         }
+    }
+
+    public Task<AdminCleanupResponse> DeleteTodayAsync(CancellationToken ct = default)
+    {
+        var egyptTimeZone = GetEgyptTimeZone();
+        var egyptNow = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, egyptTimeZone);
+        return DeleteByDateAsync(DateOnly.FromDateTime(egyptNow), ct);
+    }
+
+    private static DateTime ConvertLocalBoundaryToUtc(DateTime localTime, TimeZoneInfo timeZone)
+    {
+        while (timeZone.IsInvalidTime(localTime))
+            localTime = localTime.AddMinutes(1);
+
+        return TimeZoneInfo.ConvertTimeToUtc(localTime, timeZone);
     }
 
     private static TimeZoneInfo GetEgyptTimeZone()
