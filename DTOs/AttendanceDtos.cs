@@ -8,6 +8,7 @@ public class CheckInRequest
     [Range(-90, 90)] public decimal Latitude { get; set; }
     [Range(-180, 180)] public decimal Longitude { get; set; }
     [Range(0.01, 100000)] public decimal Accuracy { get; set; }
+    [StringLength(200)] public string? AttendanceAuthorization { get; set; }
 }
 
 public class CheckOutRequest : CheckInRequest { }
