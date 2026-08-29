@@ -10,5 +10,12 @@ public enum AttendanceRejectReason
     AlreadyCheckedIn = 6,
     NoOpenCheckIn = 7,
     InvalidCoordinates = 8,
-    DuplicateRequest = 9
+    DuplicateRequest = 9,
+    DeviceNotRegistered = 10,
+    InvalidDeviceCredential = 11,
+    DeviceCredentialRevoked = 12,
+    WebAuthnVerificationFailed = 13,
+    DeviceVerificationRequired = 14,
+    ExpiredAuthenticationChallenge = 15,
+    InvalidAuthenticationChallenge = 16
 }
