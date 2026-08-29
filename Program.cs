@@ -44,8 +44,8 @@ var webAuthnOrigins = builder.Configuration.GetSection("WebAuthn:Origins").Get<s
 
 builder.Services.AddFido2(options =>
 {
-    options.RPID = webAuthnRpId;
-    options.RPName = webAuthnRpName;
+    options.ServerDomain = webAuthnRpId;
+    options.ServerName = webAuthnRpName;
     options.Origins = new HashSet<string>(webAuthnOrigins, StringComparer.OrdinalIgnoreCase);
 });
 
