@@ -11,9 +11,10 @@ public class AttendanceService : IAttendanceService
 {
     private readonly ApplicationDbContext _db;
     private readonly IGeofenceService _geofence;
+    private readonly IWorkerDeviceVerificationService _deviceVerification;
     private readonly ILogger<AttendanceService> _logger;
-    public AttendanceService(ApplicationDbContext db, IGeofenceService geofence, ILogger<AttendanceService> logger)
-    { _db = db; _geofence = geofence; _logger = logger; }
+    public AttendanceService(ApplicationDbContext db, IGeofenceService geofence, IWorkerDeviceVerificationService deviceVerification, ILogger<AttendanceService> logger)
+    { _db = db; _geofence = geofence; _deviceVerification = deviceVerification; _logger = logger; }
 
     public async Task<ApiResponse<WorkerStatusResponse>> GetStatusAsync(string employeeCode, CancellationToken ct = default)
     {
@@ -52,7 +53,7 @@ public class AttendanceService : IAttendanceService
         _db.AttendanceAttempts.Add(attempt);
         try
         {
-            await _db.SaveChangesAsync(ct); // Reserve RequestId before business processing.
+            await _db.SaveChangesAsync(ct);
         }
         catch (DbUpdateException ex) when (IsUniqueViolation(ex))
         {
@@ -72,6 +73,14 @@ public class AttendanceService : IAttendanceService
             return await RejectAsync(attempt, AttendanceRejectReason.EmployeeInactive, "EMPLOYEE_INACTIVE", "Employee is inactive.", ct);
         if (!employee.WorkSite.IsActive)
             return await RejectAsync(attempt, AttendanceRejectReason.SiteInactive, "SITE_INACTIVE", "Work site is inactive.", ct);
+
+        var deviceFailure = await _deviceVerification.ValidateAndConsumeAttendanceAuthorizationAsync(employee.Id, type, request.AttendanceAuthorization, ct);
+        if (deviceFailure.HasValue)
+        {
+            var (code, message) = DeviceFailure(deviceFailure.Value);
+            return await RejectAsync(attempt, deviceFailure.Value, code, message, ct);
+        }
+
         if (request.Accuracy > employee.WorkSite.MaxAllowedAccuracyMeters)
         {
             var responseData = new AttendanceOperationResponse(Guid.Empty, employee.EmployeeCode, employee.FullName, employee.WorkSite.Name, now, null, null, 0, request.Accuracy, "Rejected", null, employee.WorkSite.MaxAllowedAccuracyMeters);
@@ -152,15 +161,18 @@ public class AttendanceService : IAttendanceService
 
     private static TimeZoneInfo GetEgyptTimeZone()
     {
-        try
-        {
-            return TimeZoneInfo.FindSystemTimeZoneById("Africa/Cairo");
-        }
-        catch (TimeZoneNotFoundException)
-        {
-            return TimeZoneInfo.FindSystemTimeZoneById("Egypt Standard Time");
-        }
+        try { return TimeZoneInfo.FindSystemTimeZoneById("Africa/Cairo"); }
+        catch (TimeZoneNotFoundException) { return TimeZoneInfo.FindSystemTimeZoneById("Egypt Standard Time"); }
     }
+
+    private static (string Code, string Message) DeviceFailure(AttendanceRejectReason reason) => reason switch
+    {
+        AttendanceRejectReason.DeviceVerificationRequired => ("DEVICE_VERIFICATION_REQUIRED", "Device verification is required."),
+        AttendanceRejectReason.ExpiredAuthenticationChallenge => ("EXPIRED_AUTHENTICATION_CHALLENGE", "Device verification has expired."),
+        AttendanceRejectReason.InvalidAuthenticationChallenge => ("INVALID_AUTHENTICATION_CHALLENGE", "Device verification has already been used or is invalid."),
+        AttendanceRejectReason.DeviceCredentialRevoked => ("DEVICE_CREDENTIAL_REVOKED", "The registered device credential was revoked."),
+        _ => ("INVALID_DEVICE_CREDENTIAL", "The device verification is invalid.")
+    };
 
     private static bool ValidCoordinates(CheckInRequest r) => r.Latitude is >= -90 and <= 90 && r.Longitude is >= -180 and <= 180 && r.Accuracy > 0;
     private async Task<ApiResponse<AttendanceOperationResponse>> RejectAsync(AttendanceAttempt attempt, AttendanceRejectReason reason, string code, string message, CancellationToken ct)
