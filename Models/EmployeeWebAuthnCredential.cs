@@ -8,7 +8,7 @@ public class EmployeeWebAuthnCredential
     public byte[] CredentialId { get; set; } = Array.Empty<byte>();
     public byte[] PublicKey { get; set; } = Array.Empty<byte>();
     public byte[] UserHandle { get; set; } = Array.Empty<byte>();
-    public uint SignCount { get; set; }
+    public long SignCount { get; set; }
     public string CredentialType { get; set; } = "public-key";
     public bool IsActive { get; set; } = true;
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
