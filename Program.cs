@@ -3,6 +3,7 @@ using AttendanceSystem.DTOs;
 using AttendanceSystem.Middleware;
 using AttendanceSystem.Models;
 using AttendanceSystem.Services;
+using Fido2NetLib;
 
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.HttpOverrides;
@@ -30,6 +31,22 @@ if (string.IsNullOrWhiteSpace(connectionString))
 builder.Services.AddDbContext<ApplicationDbContext>(options =>
 {
     options.UseNpgsql(connectionString);
+});
+
+// ==========================================================
+// WebAuthn / FIDO2
+// ==========================================================
+
+var webAuthnRpId = builder.Configuration["WebAuthn:RPID"] ?? "waleedzidan2020.github.io";
+var webAuthnRpName = builder.Configuration["WebAuthn:RPName"] ?? "Worker Management Attendance";
+var webAuthnOrigins = builder.Configuration.GetSection("WebAuthn:Origins").Get<string[]>()
+    ?? ["https://waleedzidan2020.github.io"];
+
+builder.Services.AddFido2(options =>
+{
+    options.RPID = webAuthnRpId;
+    options.RPName = webAuthnRpName;
+    options.Origins = new HashSet<string>(webAuthnOrigins, StringComparer.OrdinalIgnoreCase);
 });
 
 // ==========================================================
@@ -241,6 +258,7 @@ builder.Services.AddRateLimiter(options =>
 // ==========================================================
 
 builder.Services.AddScoped<IGeofenceService, GeofenceService>();
+builder.Services.AddScoped<IWorkerDeviceVerificationService, WorkerDeviceVerificationService>();
 builder.Services.AddScoped<IAttendanceService, AttendanceService>();
 builder.Services.AddScoped<IAdminDashboardService, AdminDashboardService>();
 builder.Services.AddScoped<IAdminCleanupService, AdminCleanupService>();
