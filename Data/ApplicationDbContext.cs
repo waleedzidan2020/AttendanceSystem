@@ -112,6 +112,7 @@ public class ApplicationDbContext : IdentityDbContext<ApplicationUser, IdentityR
         {
             entity.ToTable("system_settings");
             entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).ValueGeneratedNever();
             entity.Property(x => x.RequireWorkerDeviceVerification).HasDefaultValue(false);
             entity.HasData(new SystemSetting { Id = 1, RequireWorkerDeviceVerification = false, UpdatedAt = new DateTime(2026, 8, 29, 0, 0, 0, DateTimeKind.Utc) });
         });
