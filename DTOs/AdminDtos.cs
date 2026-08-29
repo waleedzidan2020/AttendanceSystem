@@ -23,7 +23,7 @@ public class EmployeeCreateRequest
     public bool IsActive { get; set; } = true;
 }
 public class EmployeeUpdateRequest : EmployeeCreateRequest { }
-public record EmployeeListItemResponse(Guid Id, string EmployeeCode, string FullName, string? PhoneNumber, Guid WorkSiteId, string SiteName, bool IsActive);
+public record EmployeeListItemResponse(Guid Id, string EmployeeCode, string FullName, string? PhoneNumber, Guid WorkSiteId, string SiteName, bool IsActive, bool HasRegisteredDevice = false);
 
 public class WorkSiteCreateRequest
 {
