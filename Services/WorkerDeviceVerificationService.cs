@@ -63,10 +63,11 @@ public class WorkerDeviceVerificationService : IWorkerDeviceVerificationService
         if (!employeeExists) return null;
 
         var now = DateTime.UtcNow;
-        var outstanding = await _db.DeviceEnrollmentAuthorizations
+        await CleanupExpiredStateAsync(now, ct);
+
+        await _db.DeviceEnrollmentAuthorizations
             .Where(x => x.EmployeeId == employeeId && x.ConsumedAtUtc == null && x.ExpiresAtUtc > now)
-            .ToListAsync(ct);
-        foreach (var item in outstanding) item.ConsumedAtUtc = now;
+            .ExecuteUpdateAsync(setters => setters.SetProperty(x => x.ConsumedAtUtc, now), ct);
 
         var token = CreateSecureToken();
         var expires = now.AddMinutes(EnrollmentLifetimeMinutes);
@@ -140,7 +141,7 @@ public class WorkerDeviceVerificationService : IWorkerDeviceVerificationService
         if (auth is null || auth.ConsumedAtUtc is not null || auth.ExpiresAtUtc <= now)
             return ApiResponse<object>.Fail("INVALID_ENROLLMENT_TOKEN", "Enrollment authorization is invalid or expired.");
 
-        var flow = await _db.WebAuthnFlowStates.FirstOrDefaultAsync(x =>
+        var flow = await _db.WebAuthnFlowStates.AsNoTracking().FirstOrDefaultAsync(x =>
             x.Id == request.ChallengeId &&
             x.EmployeeId == auth.EmployeeId &&
             x.EnrollmentAuthorizationId == auth.Id &&
@@ -153,7 +154,8 @@ public class WorkerDeviceVerificationService : IWorkerDeviceVerificationService
 
         var options = CredentialCreateOptions.FromJson(flow.OptionsJson);
         IsCredentialIdUniqueToUserAsyncDelegate uniqueCallback = async (args, cancellationToken) =>
-            !await _db.EmployeeWebAuthnCredentials.AsNoTracking().AnyAsync(x => x.CredentialId == args.CredentialId, cancellationToken);
+            !await _db.EmployeeWebAuthnCredentials.AsNoTracking()
+                .AnyAsync(x => x.CredentialId.SequenceEqual(args.CredentialId), cancellationToken);
 
         RegisteredPublicKeyCredential verified;
         try
@@ -174,14 +176,24 @@ public class WorkerDeviceVerificationService : IWorkerDeviceVerificationService
         await using var transaction = await _db.Database.BeginTransactionAsync(ct);
         try
         {
-            var activeCredentials = await _db.EmployeeWebAuthnCredentials
-                .Where(x => x.EmployeeId == auth.EmployeeId && x.IsActive)
-                .ToListAsync(ct);
-            foreach (var current in activeCredentials)
+            var consumedFlow = await _db.WebAuthnFlowStates
+                .Where(x => x.Id == flow.Id && x.ConsumedAtUtc == null && x.ExpiresAtUtc > now)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(x => x.ConsumedAtUtc, now), ct);
+            var consumedEnrollment = await _db.DeviceEnrollmentAuthorizations
+                .Where(x => x.Id == auth.Id && x.ConsumedAtUtc == null && x.ExpiresAtUtc > now)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(x => x.ConsumedAtUtc, now), ct);
+
+            if (consumedFlow != 1 || consumedEnrollment != 1)
             {
-                current.IsActive = false;
-                current.UpdatedAt = now;
+                await transaction.RollbackAsync(ct);
+                return ApiResponse<object>.Fail("INVALID_AUTHENTICATION_CHALLENGE", "The registration request has already been used or expired.");
             }
+
+            await _db.EmployeeWebAuthnCredentials
+                .Where(x => x.EmployeeId == auth.EmployeeId && x.IsActive)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(x => x.IsActive, false)
+                    .SetProperty(x => x.UpdatedAt, now), ct);
 
             _db.EmployeeWebAuthnCredentials.Add(new EmployeeWebAuthnCredential
             {
@@ -196,8 +208,6 @@ public class WorkerDeviceVerificationService : IWorkerDeviceVerificationService
                 CreatedAt = now
             });
 
-            auth.ConsumedAtUtc = now;
-            flow.ConsumedAtUtc = now;
             await _db.SaveChangesAsync(ct);
             await transaction.CommitAsync(ct);
             _logger.LogInformation("Device enrollment completed for employee {EmployeeId}", auth.EmployeeId);
@@ -234,14 +244,15 @@ public class WorkerDeviceVerificationService : IWorkerDeviceVerificationService
             UserVerification = UserVerificationRequirement.Required
         });
 
+        var now = DateTime.UtcNow;
         var flow = new WebAuthnFlowState
         {
             Id = Guid.NewGuid(),
             EmployeeId = employee.Id,
             Purpose = AuthenticationPurposePrefix + request.AttemptType,
             OptionsJson = options.ToJson(),
-            ExpiresAtUtc = DateTime.UtcNow.AddMinutes(ChallengeLifetimeMinutes),
-            CreatedAtUtc = DateTime.UtcNow
+            ExpiresAtUtc = now.AddMinutes(ChallengeLifetimeMinutes),
+            CreatedAtUtc = now
         };
         _db.WebAuthnFlowStates.Add(flow);
         await _db.SaveChangesAsync(ct);
@@ -260,7 +271,7 @@ public class WorkerDeviceVerificationService : IWorkerDeviceVerificationService
             return ApiResponse<CompleteDeviceAuthenticationResponse>.Fail("EMPLOYEE_NOT_FOUND", "Employee code was not found.");
 
         var now = DateTime.UtcNow;
-        var flow = await _db.WebAuthnFlowStates.FirstOrDefaultAsync(x =>
+        var flow = await _db.WebAuthnFlowStates.AsNoTracking().FirstOrDefaultAsync(x =>
             x.Id == request.ChallengeId &&
             x.EmployeeId == employee.Id &&
             x.Purpose == AuthenticationPurposePrefix + request.AttemptType, ct);
@@ -269,9 +280,8 @@ public class WorkerDeviceVerificationService : IWorkerDeviceVerificationService
         if (flow.ExpiresAtUtc <= now)
             return ApiResponse<CompleteDeviceAuthenticationResponse>.Fail("EXPIRED_AUTHENTICATION_CHALLENGE", "Authentication challenge has expired.");
 
-        var credential = await _db.EmployeeWebAuthnCredentials.FirstOrDefaultAsync(x =>
-            x.EmployeeId == employee.Id && x.IsActive && x.CredentialId == request.Credential.RawId, ct);
-        if (credential is null)
+        var credential = await _db.EmployeeWebAuthnCredentials.FirstOrDefaultAsync(x => x.EmployeeId == employee.Id && x.IsActive, ct);
+        if (credential is null || !credential.CredentialId.SequenceEqual(request.Credential.RawId))
             return ApiResponse<CompleteDeviceAuthenticationResponse>.Fail("INVALID_DEVICE_CREDENTIAL", "The credential is not registered for this employee.");
 
         var options = AssertionOptions.FromJson(flow.OptionsJson);
@@ -292,7 +302,7 @@ public class WorkerDeviceVerificationService : IWorkerDeviceVerificationService
                 AssertionResponse = request.Credential,
                 OriginalOptions = options,
                 StoredPublicKey = credential.PublicKey,
-                StoredSignatureCounter = credential.SignCount,
+                StoredSignatureCounter = checked((uint)credential.SignCount),
                 IsUserHandleOwnerOfCredentialIdCallback = ownerCallback
             }, ct);
         }
@@ -307,10 +317,18 @@ public class WorkerDeviceVerificationService : IWorkerDeviceVerificationService
         await using var transaction = await _db.Database.BeginTransactionAsync(ct);
         try
         {
+            var consumedFlow = await _db.WebAuthnFlowStates
+                .Where(x => x.Id == flow.Id && x.ConsumedAtUtc == null && x.ExpiresAtUtc > now)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(x => x.ConsumedAtUtc, now), ct);
+            if (consumedFlow != 1)
+            {
+                await transaction.RollbackAsync(ct);
+                return ApiResponse<CompleteDeviceAuthenticationResponse>.Fail("INVALID_AUTHENTICATION_CHALLENGE", "Authentication challenge has already been used or expired.");
+            }
+
             credential.SignCount = verified.SignCount;
             credential.LastUsedAt = now;
             credential.UpdatedAt = now;
-            flow.ConsumedAtUtc = now;
             _db.AttendanceAuthorizations.Add(new AttendanceAuthorization
             {
                 Id = Guid.NewGuid(),
@@ -334,11 +352,13 @@ public class WorkerDeviceVerificationService : IWorkerDeviceVerificationService
 
     public async Task<bool> RevokeCredentialAsync(Guid employeeId, CancellationToken ct = default)
     {
-        var credential = await _db.EmployeeWebAuthnCredentials.FirstOrDefaultAsync(x => x.EmployeeId == employeeId && x.IsActive, ct);
-        if (credential is null) return false;
-        credential.IsActive = false;
-        credential.UpdatedAt = DateTime.UtcNow;
-        await _db.SaveChangesAsync(ct);
+        var now = DateTime.UtcNow;
+        var updated = await _db.EmployeeWebAuthnCredentials
+            .Where(x => x.EmployeeId == employeeId && x.IsActive)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(x => x.IsActive, false)
+                .SetProperty(x => x.UpdatedAt, now), ct);
+        if (updated == 0) return false;
         _logger.LogInformation("Device credential revoked for employee {EmployeeId}", employeeId);
         return true;
     }
@@ -351,15 +371,16 @@ public class WorkerDeviceVerificationService : IWorkerDeviceVerificationService
 
         var now = DateTime.UtcNow;
         var hash = HashToken(token);
-        var authorization = await _db.AttendanceAuthorizations.FirstOrDefaultAsync(x =>
+        var authorization = await _db.AttendanceAuthorizations.AsNoTracking().FirstOrDefaultAsync(x =>
             x.TokenHash == hash && x.EmployeeId == employeeId && x.AttemptType == attemptType, ct);
         if (authorization is null) return AttendanceRejectReason.InvalidDeviceCredential;
         if (authorization.ConsumedAtUtc is not null) return AttendanceRejectReason.InvalidAuthenticationChallenge;
         if (authorization.ExpiresAtUtc <= now) return AttendanceRejectReason.ExpiredAuthenticationChallenge;
 
-        authorization.ConsumedAtUtc = now;
-        await _db.SaveChangesAsync(ct);
-        return null;
+        var consumed = await _db.AttendanceAuthorizations
+            .Where(x => x.Id == authorization.Id && x.ConsumedAtUtc == null && x.ExpiresAtUtc > now)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(x => x.ConsumedAtUtc, now), ct);
+        return consumed == 1 ? null : AttendanceRejectReason.InvalidAuthenticationChallenge;
     }
 
     private async Task<SystemSetting> GetOrCreateSettingAsync(CancellationToken ct)
@@ -376,7 +397,15 @@ public class WorkerDeviceVerificationService : IWorkerDeviceVerificationService
     {
         if (string.IsNullOrWhiteSpace(token)) return null;
         var hash = HashToken(token);
-        return await _db.DeviceEnrollmentAuthorizations.FirstOrDefaultAsync(x => x.TokenHash == hash, ct);
+        return await _db.DeviceEnrollmentAuthorizations.AsNoTracking().FirstOrDefaultAsync(x => x.TokenHash == hash, ct);
+    }
+
+    private async Task CleanupExpiredStateAsync(DateTime now, CancellationToken ct)
+    {
+        var cutoff = now.AddDays(-1);
+        await _db.WebAuthnFlowStates.Where(x => x.ExpiresAtUtc < cutoff).ExecuteDeleteAsync(ct);
+        await _db.AttendanceAuthorizations.Where(x => x.ExpiresAtUtc < cutoff).ExecuteDeleteAsync(ct);
+        await _db.DeviceEnrollmentAuthorizations.Where(x => x.ExpiresAtUtc < cutoff).ExecuteDeleteAsync(ct);
     }
 
     private static string CreateSecureToken() => Convert.ToBase64String(RandomNumberGenerator.GetBytes(32))
