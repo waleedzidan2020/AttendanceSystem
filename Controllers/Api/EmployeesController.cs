@@ -8,6 +8,7 @@ namespace AttendanceSystem.Controllers.Api;
 [ApiController, Authorize(Roles = "Admin"), Route("api/admin/employees")]
 public class EmployeesController : ControllerBase
 {
+    private const string DeviceCredentialType = "webcrypto-p256";
     private readonly ApplicationDbContext _db; public EmployeesController(ApplicationDbContext db) => _db=db;
     [HttpGet]
     public async Task<IActionResult> List([FromQuery]string? search,[FromQuery]Guid? siteId,[FromQuery]bool? isActive,[FromQuery]int page=1,[FromQuery]int pageSize=25,CancellationToken ct=default)
@@ -17,7 +18,7 @@ public class EmployeesController : ControllerBase
         if(siteId.HasValue)q=q.Where(x=>x.WorkSiteId==siteId);if(isActive.HasValue)q=q.Where(x=>x.IsActive==isActive);
         var total=await q.CountAsync(ct);var items=await q.OrderBy(x=>x.EmployeeCode).Skip((page-1)*pageSize).Take(pageSize)
             .Select(x=>new EmployeeListItemResponse(x.Id,x.EmployeeCode,x.FullName,x.PhoneNumber,x.WorkSiteId,x.WorkSite.Name,x.IsActive,
-                _db.EmployeeWebAuthnCredentials.Any(c=>c.EmployeeId==x.Id&&c.IsActive))).ToListAsync(ct);
+                _db.EmployeeWebAuthnCredentials.Any(c=>c.EmployeeId==x.Id&&c.IsActive&&c.CredentialType==DeviceCredentialType))).ToListAsync(ct);
         return Ok(ApiResponse<PagedResponse<EmployeeListItemResponse>>.Ok(new(items,page,pageSize,total,(int)Math.Ceiling(total/(double)pageSize))));
     }
     [HttpGet("{id:guid}")]
@@ -25,7 +26,7 @@ public class EmployeesController : ControllerBase
     {
         var x=await _db.Employees.AsNoTracking().Include(e=>e.WorkSite).FirstOrDefaultAsync(e=>e.Id==id,ct);
         if(x is null)return NotFound();
-        var hasRegisteredDevice=await _db.EmployeeWebAuthnCredentials.AsNoTracking().AnyAsync(c=>c.EmployeeId==id&&c.IsActive,ct);
+        var hasRegisteredDevice=await _db.EmployeeWebAuthnCredentials.AsNoTracking().AnyAsync(c=>c.EmployeeId==id&&c.IsActive&&c.CredentialType==DeviceCredentialType,ct);
         return Ok(ApiResponse<EmployeeListItemResponse>.Ok(new(x.Id,x.EmployeeCode,x.FullName,x.PhoneNumber,x.WorkSiteId,x.WorkSite.Name,x.IsActive,hasRegisteredDevice)));
     }
     [HttpPost]
