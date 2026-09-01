@@ -1,11 +1,10 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using AttendanceSystem.Data;
 using AttendanceSystem.DTOs;
 using AttendanceSystem.Enums;
 using AttendanceSystem.Models;
-using Fido2NetLib;
-using Fido2NetLib.Objects;
 using Microsoft.EntityFrameworkCore;
 
 namespace AttendanceSystem.Services;
@@ -17,15 +16,15 @@ public class WorkerDeviceVerificationService : IWorkerDeviceVerificationService
     private const int AttendanceAuthorizationLifetimeMinutes = 2;
     private const string EnrollmentPurpose = "Registration";
     private const string AuthenticationPurposePrefix = "Authentication:";
+    private const string DeviceCredentialType = "webcrypto-p256";
+    private const string DeviceAlgorithm = "ECDSA-P256-SHA256";
 
     private readonly ApplicationDbContext _db;
-    private readonly IFido2 _fido2;
     private readonly ILogger<WorkerDeviceVerificationService> _logger;
 
-    public WorkerDeviceVerificationService(ApplicationDbContext db, IFido2 fido2, ILogger<WorkerDeviceVerificationService> logger)
+    public WorkerDeviceVerificationService(ApplicationDbContext db, ILogger<WorkerDeviceVerificationService> logger)
     {
         _db = db;
-        _fido2 = fido2;
         _logger = logger;
     }
 
@@ -47,7 +46,7 @@ public class WorkerDeviceVerificationService : IWorkerDeviceVerificationService
     public async Task<EmployeeDeviceStatusResponse> GetEmployeeDeviceStatusAsync(Guid employeeId, CancellationToken ct = default)
     {
         var credential = await _db.EmployeeWebAuthnCredentials.AsNoTracking()
-            .Where(x => x.EmployeeId == employeeId)
+            .Where(x => x.EmployeeId == employeeId && x.CredentialType == DeviceCredentialType)
             .OrderByDescending(x => x.IsActive)
             .ThenByDescending(x => x.CreatedAt)
             .FirstOrDefaultAsync(ct);
@@ -96,42 +95,24 @@ public class WorkerDeviceVerificationService : IWorkerDeviceVerificationService
         var employee = await _db.Employees.AsNoTracking().FirstOrDefaultAsync(x => x.Id == auth.EmployeeId, ct);
         if (employee is null)
             return ApiResponse<DeviceEnrollmentOptionsResponse>.Fail("EMPLOYEE_NOT_FOUND", "Employee code was not found.");
+        if (!employee.IsActive)
+            return ApiResponse<DeviceEnrollmentOptionsResponse>.Fail("EMPLOYEE_INACTIVE", "Employee is inactive.");
 
-        var existingKeys = await _db.EmployeeWebAuthnCredentials.AsNoTracking()
-            .Where(x => x.EmployeeId == employee.Id && x.IsActive)
-            .Select(x => x.CredentialId)
-            .ToListAsync(ct);
-
-        var user = new Fido2User
-        {
-            DisplayName = employee.FullName,
-            Name = employee.EmployeeCode,
-            Id = employee.Id.ToByteArray()
-        };
-
-        var options = _fido2.RequestNewCredential(new RequestNewCredentialParams
-        {
-            User = user,
-            ExcludeCredentials = existingKeys.Select(x => new PublicKeyCredentialDescriptor(x)).ToList(),
-            AuthenticatorSelection = AuthenticatorSelection.Default,
-            AttestationPreference = AttestationConveyancePreference.None,
-            Extensions = new AuthenticationExtensionsClientInputs { CredProps = true }
-        });
-
+        var deviceId = Guid.NewGuid();
         var flow = new WebAuthnFlowState
         {
             Id = Guid.NewGuid(),
             EmployeeId = employee.Id,
             EnrollmentAuthorizationId = auth.Id,
             Purpose = EnrollmentPurpose,
-            OptionsJson = options.ToJson(),
+            OptionsJson = JsonSerializer.Serialize(new EnrollmentFlowState(deviceId)),
             ExpiresAtUtc = now.AddMinutes(ChallengeLifetimeMinutes),
             CreatedAtUtc = now
         };
         _db.WebAuthnFlowStates.Add(flow);
         await _db.SaveChangesAsync(ct);
 
-        return ApiResponse<DeviceEnrollmentOptionsResponse>.Ok(new(flow.Id, employee.FullName, options));
+        return ApiResponse<DeviceEnrollmentOptionsResponse>.Ok(new(flow.Id, employee.FullName, deviceId, DeviceAlgorithm));
     }
 
     public async Task<ApiResponse<object>> CompleteEnrollmentAsync(CompleteDeviceEnrollmentRequest request, CancellationToken ct = default)
@@ -148,30 +129,25 @@ public class WorkerDeviceVerificationService : IWorkerDeviceVerificationService
             x.Purpose == EnrollmentPurpose, ct);
 
         if (flow is null || flow.ConsumedAtUtc is not null)
-            return ApiResponse<object>.Fail("INVALID_AUTHENTICATION_CHALLENGE", "The registration challenge is invalid.");
+            return ApiResponse<object>.Fail("INVALID_AUTHENTICATION_CHALLENGE", "The registration request is invalid.");
         if (flow.ExpiresAtUtc <= now)
-            return ApiResponse<object>.Fail("EXPIRED_AUTHENTICATION_CHALLENGE", "The registration challenge has expired.");
+            return ApiResponse<object>.Fail("EXPIRED_AUTHENTICATION_CHALLENGE", "The registration request has expired.");
 
-        var options = CredentialCreateOptions.FromJson(flow.OptionsJson);
-        IsCredentialIdUniqueToUserAsyncDelegate uniqueCallback = async (args, cancellationToken) =>
-            !await _db.EmployeeWebAuthnCredentials.AsNoTracking()
-                .AnyAsync(x => x.CredentialId.SequenceEqual(args.CredentialId), cancellationToken);
-
-        RegisteredPublicKeyCredential verified;
+        EnrollmentFlowState? enrollmentState;
         try
         {
-            verified = await _fido2.MakeNewCredentialAsync(new MakeNewCredentialParams
-            {
-                AttestationResponse = request.Credential,
-                OriginalOptions = options,
-                IsCredentialIdUniqueToUserCallback = uniqueCallback
-            }, ct);
+            enrollmentState = JsonSerializer.Deserialize<EnrollmentFlowState>(flow.OptionsJson);
         }
-        catch (Exception ex)
+        catch (JsonException)
         {
-            _logger.LogWarning(ex, "WebAuthn registration verification failed for employee {EmployeeId}", auth.EmployeeId);
-            return ApiResponse<object>.Fail("WEBAUTHN_VERIFICATION_FAILED", "Device registration verification failed.");
+            enrollmentState = null;
         }
+
+        if (enrollmentState is null || enrollmentState.DeviceId != request.DeviceId)
+            return ApiResponse<object>.Fail("INVALID_DEVICE_CREDENTIAL", "The device registration does not match this request.");
+
+        if (!TryNormalizePublicKey(request.PublicKey, out var publicKeyJson))
+            return ApiResponse<object>.Fail("INVALID_DEVICE_PUBLIC_KEY", "The device public key is invalid.");
 
         await using var transaction = await _db.Database.BeginTransactionAsync(ct);
         try
@@ -199,19 +175,19 @@ public class WorkerDeviceVerificationService : IWorkerDeviceVerificationService
             {
                 Id = Guid.NewGuid(),
                 EmployeeId = auth.EmployeeId,
-                CredentialId = verified.Id,
-                PublicKey = verified.PublicKey,
-                UserHandle = verified.User.Id,
-                SignCount = verified.SignCount,
-                CredentialType = "public-key",
+                CredentialId = request.DeviceId.ToByteArray(),
+                PublicKey = Encoding.UTF8.GetBytes(publicKeyJson),
+                UserHandle = Array.Empty<byte>(),
+                SignCount = 0,
+                CredentialType = DeviceCredentialType,
                 IsActive = true,
                 CreatedAt = now
             });
 
             await _db.SaveChangesAsync(ct);
             await transaction.CommitAsync(ct);
-            _logger.LogInformation("Device enrollment completed for employee {EmployeeId}", auth.EmployeeId);
-            return ApiResponse<object>.Ok(new { registered = true }, "Device registered successfully.");
+            _logger.LogInformation("Browser device enrollment completed for employee {EmployeeId} and device {DeviceId}", auth.EmployeeId, request.DeviceId);
+            return ApiResponse<object>.Ok(new { registered = true, deviceId = request.DeviceId }, "Device registered successfully.");
         }
         catch
         {
@@ -224,7 +200,7 @@ public class WorkerDeviceVerificationService : IWorkerDeviceVerificationService
     {
         var setting = await GetOrCreateSettingAsync(ct);
         if (!setting.RequireWorkerDeviceVerification)
-            return ApiResponse<DeviceAuthenticationOptionsResponse>.Ok(new(false, null, null));
+            return ApiResponse<DeviceAuthenticationOptionsResponse>.Ok(new(false, null, null, null, null));
 
         var code = request.EmployeeCode.Trim();
         var employee = await _db.Employees.AsNoTracking().FirstOrDefaultAsync(x => x.EmployeeCode == code, ct);
@@ -234,30 +210,29 @@ public class WorkerDeviceVerificationService : IWorkerDeviceVerificationService
             return ApiResponse<DeviceAuthenticationOptionsResponse>.Fail("EMPLOYEE_INACTIVE", "Employee is inactive.");
 
         var credential = await _db.EmployeeWebAuthnCredentials.AsNoTracking()
-            .FirstOrDefaultAsync(x => x.EmployeeId == employee.Id && x.IsActive, ct);
-        if (credential is null)
-            return ApiResponse<DeviceAuthenticationOptionsResponse>.Fail("DEVICE_NOT_REGISTERED", "No active device credential is registered for this employee.");
+            .FirstOrDefaultAsync(x => x.EmployeeId == employee.Id && x.IsActive && x.CredentialType == DeviceCredentialType, ct);
+        if (credential is null || credential.CredentialId.Length != 16)
+            return ApiResponse<DeviceAuthenticationOptionsResponse>.Fail("DEVICE_NOT_REGISTERED", "No active browser device credential is registered for this employee.");
 
-        var options = _fido2.GetAssertionOptions(new GetAssertionOptionsParams
-        {
-            AllowedCredentials = new[] { new PublicKeyCredentialDescriptor(credential.CredentialId) },
-            UserVerification = UserVerificationRequirement.Required
-        });
-
+        var deviceId = new Guid(credential.CredentialId);
+        var flowId = Guid.NewGuid();
+        var challenge = CreateSecureToken();
+        var dataToSign = $"v1|{flowId:N}|{challenge}|{employee.Id:N}|{(int)request.AttemptType}|{deviceId:N}";
         var now = DateTime.UtcNow;
+
         var flow = new WebAuthnFlowState
         {
-            Id = Guid.NewGuid(),
+            Id = flowId,
             EmployeeId = employee.Id,
             Purpose = AuthenticationPurposePrefix + request.AttemptType,
-            OptionsJson = options.ToJson(),
+            OptionsJson = JsonSerializer.Serialize(new AuthenticationFlowState(deviceId, dataToSign)),
             ExpiresAtUtc = now.AddMinutes(ChallengeLifetimeMinutes),
             CreatedAtUtc = now
         };
         _db.WebAuthnFlowStates.Add(flow);
         await _db.SaveChangesAsync(ct);
 
-        return ApiResponse<DeviceAuthenticationOptionsResponse>.Ok(new(true, flow.Id, options));
+        return ApiResponse<DeviceAuthenticationOptionsResponse>.Ok(new(true, flow.Id, deviceId, DeviceAlgorithm, dataToSign));
     }
 
     public async Task<ApiResponse<CompleteDeviceAuthenticationResponse>> CompleteAuthenticationAsync(CompleteDeviceAuthenticationRequest request, CancellationToken ct = default)
@@ -269,6 +244,8 @@ public class WorkerDeviceVerificationService : IWorkerDeviceVerificationService
         var employee = await _db.Employees.AsNoTracking().FirstOrDefaultAsync(x => x.EmployeeCode == request.EmployeeCode.Trim(), ct);
         if (employee is null)
             return ApiResponse<CompleteDeviceAuthenticationResponse>.Fail("EMPLOYEE_NOT_FOUND", "Employee code was not found.");
+        if (!employee.IsActive)
+            return ApiResponse<CompleteDeviceAuthenticationResponse>.Fail("EMPLOYEE_INACTIVE", "Employee is inactive.");
 
         var now = DateTime.UtcNow;
         var flow = await _db.WebAuthnFlowStates.AsNoTracking().FirstOrDefaultAsync(x =>
@@ -280,36 +257,30 @@ public class WorkerDeviceVerificationService : IWorkerDeviceVerificationService
         if (flow.ExpiresAtUtc <= now)
             return ApiResponse<CompleteDeviceAuthenticationResponse>.Fail("EXPIRED_AUTHENTICATION_CHALLENGE", "Authentication challenge has expired.");
 
-        var credential = await _db.EmployeeWebAuthnCredentials.FirstOrDefaultAsync(x => x.EmployeeId == employee.Id && x.IsActive, ct);
-        if (credential is null || !credential.CredentialId.SequenceEqual(request.Credential.RawId))
-            return ApiResponse<CompleteDeviceAuthenticationResponse>.Fail("INVALID_DEVICE_CREDENTIAL", "The credential is not registered for this employee.");
-
-        var options = AssertionOptions.FromJson(flow.OptionsJson);
-        IsUserHandleOwnerOfCredentialIdAsync ownerCallback = async (args, cancellationToken) =>
-        {
-            if (!args.CredentialId.SequenceEqual(credential.CredentialId)) return false;
-            if (args.UserHandle is null || args.UserHandle.Length == 0) return true;
-            return args.UserHandle.SequenceEqual(credential.UserHandle) &&
-                   await _db.EmployeeWebAuthnCredentials.AsNoTracking().AnyAsync(x =>
-                       x.Id == credential.Id && x.EmployeeId == employee.Id && x.IsActive, cancellationToken);
-        };
-
-        VerifyAssertionResult verified;
+        AuthenticationFlowState? authenticationState;
         try
         {
-            verified = await _fido2.MakeAssertionAsync(new MakeAssertionParams
-            {
-                AssertionResponse = request.Credential,
-                OriginalOptions = options,
-                StoredPublicKey = credential.PublicKey,
-                StoredSignatureCounter = checked((uint)credential.SignCount),
-                IsUserHandleOwnerOfCredentialIdCallback = ownerCallback
-            }, ct);
+            authenticationState = JsonSerializer.Deserialize<AuthenticationFlowState>(flow.OptionsJson);
         }
-        catch (Exception ex)
+        catch (JsonException)
         {
-            _logger.LogWarning(ex, "WebAuthn authentication verification failed for employee {EmployeeId}", employee.Id);
-            return ApiResponse<CompleteDeviceAuthenticationResponse>.Fail("WEBAUTHN_VERIFICATION_FAILED", "Device verification failed.");
+            authenticationState = null;
+        }
+
+        if (authenticationState is null || authenticationState.DeviceId != request.DeviceId)
+            return ApiResponse<CompleteDeviceAuthenticationResponse>.Fail("DEVICE_MISMATCH", "The registered device does not match this request.");
+
+        var credential = await _db.EmployeeWebAuthnCredentials.FirstOrDefaultAsync(x =>
+            x.EmployeeId == employee.Id &&
+            x.IsActive &&
+            x.CredentialType == DeviceCredentialType, ct);
+        if (credential is null || credential.CredentialId.Length != 16 || !credential.CredentialId.SequenceEqual(request.DeviceId.ToByteArray()))
+            return ApiResponse<CompleteDeviceAuthenticationResponse>.Fail("INVALID_DEVICE_CREDENTIAL", "The device is not registered for this employee.");
+
+        if (!VerifyDeviceSignature(credential.PublicKey, authenticationState.DataToSign, request.Signature))
+        {
+            _logger.LogWarning("Browser device signature verification failed for employee {EmployeeId} and device {DeviceId}", employee.Id, request.DeviceId);
+            return ApiResponse<CompleteDeviceAuthenticationResponse>.Fail("INVALID_DEVICE_SIGNATURE", "Device verification failed.");
         }
 
         var attendanceToken = CreateSecureToken();
@@ -326,7 +297,6 @@ public class WorkerDeviceVerificationService : IWorkerDeviceVerificationService
                 return ApiResponse<CompleteDeviceAuthenticationResponse>.Fail("INVALID_AUTHENTICATION_CHALLENGE", "Authentication challenge has already been used or expired.");
             }
 
-            credential.SignCount = verified.SignCount;
             credential.LastUsedAt = now;
             credential.UpdatedAt = now;
             _db.AttendanceAuthorizations.Add(new AttendanceAuthorization
@@ -340,7 +310,7 @@ public class WorkerDeviceVerificationService : IWorkerDeviceVerificationService
             });
             await _db.SaveChangesAsync(ct);
             await transaction.CommitAsync(ct);
-            _logger.LogInformation("WebAuthn verification succeeded for employee {EmployeeId}", employee.Id);
+            _logger.LogInformation("Browser device verification succeeded for employee {EmployeeId} and device {DeviceId}", employee.Id, request.DeviceId);
             return ApiResponse<CompleteDeviceAuthenticationResponse>.Ok(new(attendanceToken, expires));
         }
         catch
@@ -354,12 +324,12 @@ public class WorkerDeviceVerificationService : IWorkerDeviceVerificationService
     {
         var now = DateTime.UtcNow;
         var updated = await _db.EmployeeWebAuthnCredentials
-            .Where(x => x.EmployeeId == employeeId && x.IsActive)
+            .Where(x => x.EmployeeId == employeeId && x.IsActive && x.CredentialType == DeviceCredentialType)
             .ExecuteUpdateAsync(setters => setters
                 .SetProperty(x => x.IsActive, false)
                 .SetProperty(x => x.UpdatedAt, now), ct);
         if (updated == 0) return false;
-        _logger.LogInformation("Device credential revoked for employee {EmployeeId}", employeeId);
+        _logger.LogInformation("Browser device credential revoked for employee {EmployeeId}", employeeId);
         return true;
     }
 
@@ -408,8 +378,88 @@ public class WorkerDeviceVerificationService : IWorkerDeviceVerificationService
         await _db.DeviceEnrollmentAuthorizations.Where(x => x.ExpiresAtUtc < cutoff).ExecuteDeleteAsync(ct);
     }
 
+    private static bool TryNormalizePublicKey(DevicePublicKeyJwk key, out string normalizedJson)
+    {
+        normalizedJson = string.Empty;
+        if (!string.Equals(key.Kty, "EC", StringComparison.Ordinal) ||
+            !string.Equals(key.Crv, "P-256", StringComparison.Ordinal) ||
+            !string.IsNullOrWhiteSpace(key.D))
+            return false;
+
+        if (!TryBase64UrlDecode(key.X, out var x) || x.Length != 32 ||
+            !TryBase64UrlDecode(key.Y, out var y) || y.Length != 32)
+            return false;
+
+        try
+        {
+            using var ecdsa = ECDsa.Create(new ECParameters
+            {
+                Curve = ECCurve.NamedCurves.nistP256,
+                Q = new ECPoint { X = x, Y = y }
+            });
+            _ = ecdsa.ExportParameters(false);
+        }
+        catch (CryptographicException)
+        {
+            return false;
+        }
+
+        normalizedJson = JsonSerializer.Serialize(new { kty = "EC", crv = "P-256", x = key.X, y = key.Y });
+        return true;
+    }
+
+    private static bool VerifyDeviceSignature(byte[] storedPublicKey, string dataToSign, string signatureText)
+    {
+        if (storedPublicKey.Length == 0 || storedPublicKey.Length > 2048 || dataToSign.Length > 2048)
+            return false;
+        if (!TryBase64UrlDecode(signatureText, out var signature) || signature.Length != 64)
+            return false;
+
+        try
+        {
+            var jwk = JsonSerializer.Deserialize<DevicePublicKeyJwk>(Encoding.UTF8.GetString(storedPublicKey));
+            if (jwk is null || !TryBase64UrlDecode(jwk.X, out var x) || !TryBase64UrlDecode(jwk.Y, out var y) || x.Length != 32 || y.Length != 32)
+                return false;
+
+            using var ecdsa = ECDsa.Create(new ECParameters
+            {
+                Curve = ECCurve.NamedCurves.nistP256,
+                Q = new ECPoint { X = x, Y = y }
+            });
+            return ecdsa.VerifyData(
+                Encoding.UTF8.GetBytes(dataToSign),
+                signature,
+                HashAlgorithmName.SHA256,
+                DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
+        }
+        catch (Exception ex) when (ex is JsonException or CryptographicException or FormatException)
+        {
+            return false;
+        }
+    }
+
+    private static bool TryBase64UrlDecode(string value, out byte[] bytes)
+    {
+        bytes = Array.Empty<byte>();
+        if (string.IsNullOrWhiteSpace(value) || value.Length > 512) return false;
+        try
+        {
+            var base64 = value.Replace('-', '+').Replace('_', '/');
+            base64 = base64.PadRight(base64.Length + ((4 - base64.Length % 4) % 4), '=');
+            bytes = Convert.FromBase64String(base64);
+            return true;
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
+    }
+
     private static string CreateSecureToken() => Convert.ToBase64String(RandomNumberGenerator.GetBytes(32))
         .TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
     private static string HashToken(string token) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(token)));
+
+    private sealed record EnrollmentFlowState(Guid DeviceId);
+    private sealed record AuthenticationFlowState(Guid DeviceId, string DataToSign);
 }
