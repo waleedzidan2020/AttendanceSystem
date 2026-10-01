@@ -15,6 +15,18 @@ using System.Threading.RateLimiting;
 var builder = WebApplication.CreateBuilder(args);
 
 // ==========================================================
+// Logging
+// ==========================================================
+//
+// Somee shared hosting does not allow this app process to write to the
+// Windows Event Log. The default EventLog provider can therefore throw
+// during host startup (HTTP 500.30). Use console logging only so IIS/ANCM
+// can capture messages through stdout without requiring Event Log access.
+//
+builder.Logging.ClearProviders();
+builder.Logging.AddConsole();
+
+// ==========================================================
 // Database
 // ==========================================================
 
