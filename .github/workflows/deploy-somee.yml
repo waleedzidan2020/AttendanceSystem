@@ -50,6 +50,35 @@ jobs:
       - name: Publish project
         run: dotnet publish AttendanceSystem.csproj -c Release -f net8.0 --no-build -o ./publish
 
+      - name: Create production runtime settings
+        env:
+          SUPABASE_CONNECTION_STRING: ${{ secrets.SUPABASE_CONNECTION_STRING }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          connection_string = os.environ.get("SUPABASE_CONNECTION_STRING", "").strip()
+          if not connection_string:
+              raise SystemExit("SUPABASE_CONNECTION_STRING secret is missing or empty.")
+
+          path = Path("publish/appsettings.Production.json")
+          path.write_text(
+              json.dumps(
+                  {
+                      "ConnectionStrings": {
+                          "DefaultConnection": connection_string
+                      }
+                  },
+                  ensure_ascii=False,
+                  indent=2
+              ),
+              encoding="utf-8"
+          )
+          print("Created publish/appsettings.Production.json")
+          PY
+
       - name: Deploy to Somee via FTP
         uses: SamKirkland/FTP-Deploy-Action@v4.3.5
         with:
