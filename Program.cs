@@ -346,9 +346,35 @@ if (string.Equals(
 // ==========================================================
 // Seed
 // ==========================================================
+//
+// Production data is already managed in Supabase. Do not make application
+// startup depend on seed queries; a transient database/network issue would
+// otherwise stop IIS from starting the app and produce HTTP 500.30.
+// Seed automatically in Development, or explicitly when RUN_SEED_DATA=true.
+//
+var shouldSeedData =
+    app.Environment.IsDevelopment() ||
+    string.Equals(
+        Environment.GetEnvironmentVariable("RUN_SEED_DATA"),
+        "true",
+        StringComparison.OrdinalIgnoreCase);
 
-await SeedData.InitializeAsync(
-    app.Services,
-    app.Environment);
+if (shouldSeedData)
+{
+    try
+    {
+        await SeedData.InitializeAsync(
+            app.Services,
+            app.Environment);
+    }
+    catch (Exception ex)
+    {
+        app.Logger.LogError(ex, "Seed data initialization failed.");
+        if (app.Environment.IsDevelopment())
+        {
+            throw;
+        }
+    }
+}
 
 app.Run();
