@@ -63,20 +63,14 @@ jobs:
           if not connection_string:
               raise SystemExit("SUPABASE_CONNECTION_STRING secret is missing or empty.")
 
-          path = Path("publish/appsettings.Production.json")
+          path = Path("publish/appsettings.json")
+          data = json.loads(path.read_text(encoding="utf-8"))
+          data.setdefault("ConnectionStrings", {})["DefaultConnection"] = connection_string
           path.write_text(
-              json.dumps(
-                  {
-                      "ConnectionStrings": {
-                          "DefaultConnection": connection_string
-                      }
-                  },
-                  ensure_ascii=False,
-                  indent=2
-              ),
+              json.dumps(data, ensure_ascii=False, indent=2),
               encoding="utf-8"
           )
-          print("Created publish/appsettings.Production.json")
+          print("Injected DefaultConnection into publish/appsettings.json")
           PY
 
       - name: Deploy to Somee via FTP
